@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Module Scanner Pro</title>
+<style>
+  /* Keep your existing CSS here - ensure safe-area-inset-top is used for the header */
+  :root { --bg:#060606; --ac:#f59e0b; --tx:#e0e0e0; }
+  body { background:var(--bg); color:var(--tx); font-family:ui-monospace, monospace; margin:0; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); padding:10px 20px; border-radius:8px; display:none; z-index:9999; }
+  .t-warn { background:#ef4444; } .t-ok { background:#22c55e; }
+  .show { display:block; }
+</style>
+</head>
+<body>
+
+<div id="toast" class="toast"></div>
+
+<script>
+/* ─────────────────────────────────────────────
+   PATCHED LOGIC
+───────────────────────────────────────────── */
+
+// 1. MEMORY-SAFE ZIP BUILDER
+// Replaced .apply() with iterative allocation to prevent stack overflow
+function mkzip(files) {
+  var SL=function(s){var b=new Uint8Array(s.length);for(var i=0;i<s.length;i++)b[i]=s.charCodeAt(i);return b};
+  var SC=function(n){return new Uint8Array([n&255,(n>>8)&255])};
+  var SE=function(n){return new Uint8Array([n&255,(n>>8)&255,(n>>16)&255,(n>>24)&255])};
+  var locs=[], cds=[], offset=0;
+
+  for (var i=0; i<files.length; i++) {
+    var f=files[i], name=SL(f.name), data=f.data, time=SC(0), date=SC(0), crc=SE(0); // Simplified CRC
+    var lh=new Uint8Array(30+name.length);
+    lh.set([80,75,3,4,10,0,0,0,0,0]); lh.set(time,10); lh.set(date,12); lh.set(crc,14);
+    lh.set(SE(data.length),18); lh.set(SE(data.length),22); lh.set(SC(name.length),26); lh.set(SC(0),28);
+    lh.set(name,30);
+    locs.push({lh:lh, data:data});
+    
+    var ch=new Uint8Array(46+name.length);
+    ch.set([80,75,1,2,10,0,10,0,0,0,0,0]); ch.set(time,12); ch.set(date,14); ch.set(crc,16);
+    ch.set(SE(data.length),20); ch.set(SE(data.length),24); ch.set(SC(name.length),28);
+    ch.set(new Uint8Array(12),30); ch.set(SE(offset),42); ch.set(name,46);
+    cds.push(ch);
+    offset += lh.length + data.length;
+  }
+
+  var eocd=new Uint8Array(22);
+  eocd.set([80,75,5,6,0,0,0,0]); eocd.set(SC(files.length),8); eocd.set(SC(files.length),10);
+  var cdSize=0; for(var j=0; j<cds.length; j++) cdSize+=cds[j].length;
+  eocd.set(SE(cdSize),12); eocd.set(SE(offset),16);
+
+  // SAFE ALLOCATION
+  var p=[];
+  for(var k=0; k<locs.length; k++){ p.push(locs[k].lh); p.push(locs[k].data); }
+  for(var l=0; l<cds.length; l++) p.push(cds[l]);
+  p.push(eocd);
+
+  var totalLen = 0;
+  for(var m=0; m<p.length; m++) totalLen += p[m].length;
+  var finalOut = new Uint8Array(totalLen);
+  var currentOffset = 0;
+  for(var n=0; n<p.length; n++){ 
+    finalOut.set(p[n], currentOffset); 
+    currentOffset += p[n].length; 
+  }
+  return finalOut;
+}
+
+// 2. TIMEOUT-PROTECTED AI SCAN
+async function aiScan(blob) {
+  var key = getANK(); // Your existing key retriever
+  if(!key) throw new Error('AI Key Missing');
+  
+  var controller = new AbortController();
+  var timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+  try {
+    // ... [Your existing compression/base64 logic] ...
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({ /* ... your prompt ... */ })
+    });
+    clearTimeout(timeoutId);
+    if(!resp.ok) throw new Error('API Error');
+    return await resp.json();
+  } catch(e) {
+    if(e.name === 'AbortError') throw new Error('Request timed out. Check connection.');
+    throw e;
+  }
+}
+
+// 3. STORAGE ERROR HANDLING
+function dbSave(m) {
+  if(!DB || !curId) return;
+  try {
+    var tx = DB.transaction('mods','readwrite');
+    tx.objectStore('mods').put(m);
+    tx.onabort = function() { notify('Storage Full! Cannot save photo.', 'warn'); };
+  } catch(e) {
+    notify('Database Error!', 'warn');
+  }
+}
+
+function notify(msg, type) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (type === 'warn' ? 't-warn' : 't-ok') + ' show';
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// Register SW
+if('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js');
+}
+</script>
+</body>
+</html>
