@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Module Scanner Pro</title>
+<style>
+  :root {
+    --bg:#060606; --s1:#0e0e0e; --s2:#161616; --bd:#222;
+    --tx:#e0e0e0; --mu:#4a4a4a; --mu2:#1c1c1c;
+    --ac:#f59e0b; --bl:#3b82f6; --gn:#22c55e; --rd:#ef4444;
+    --st:env(safe-area-inset-top,0px);
+    --sb:env(safe-area-inset-bottom,0px);
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  body{background:var(--bg);color:var(--tx);font-family:ui-monospace,'SF Mono',monospace;min-height:100vh}
+  
+  /* Toast Notifications */
+  .toast{position:fixed;bottom:calc(20px + var(--sb));left:50%;transform:translateX(-50%);
+         padding:12px 20px;border-radius:8px;font-size:14px;z-index:9999;
+         opacity:0;pointer-events:none;transition:opacity 0.3s, transform 0.3s;}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(-10px);pointer-events:auto;}
+  .t-warn{background:var(--rd);color:#fff}
+  .t-ok{background:var(--gn);color:#fff}
+</style>
+</head>
+<body>
+
+<div id="toast" class="toast"></div>
+
+<script>
+/* ─────────────────────────────────────────────
+   STABILITY PATCHES
+───────────────────────────────────────────── */
+
+// 1. MEMORY-SAFE ZIP GENERATOR
+// Iterative buffer allocation avoids "Maximum call stack size exceeded"
+function mkzip(files) {
+  const SL=s=>{const b=new Uint8Array(s.length);for(let i=0;i<s.length;i++)b[i]=s.charCodeAt(i);return b};
+  const SC=n=>new Uint8Array([n&255,(n>>8)&255]);
+  const SE=n=>new Uint8Array([n&255,(n>>8)&255,(n>>16)&255,(n>>24)&255]);
+  
+  let locs=[], cds=[], offset=0;
+
+  files.forEach(f => {
+    const name=SL(f.name), data=f.data, time=SC(0), date=SC(0), crc=SE(0);
+    const lh=new Uint8Array(30+name.length);
+    lh.set([80,75,3,4,10,0,0,0,0,0]); lh.set(time,10); lh.set(date,12); lh.set(crc,14);
+    lh.set(SE(data.length),18); lh.set(SE(data.length),22); lh.set(SC(name.length),26); lh.set(SC(0),28);
+    lh.set(name,30);
+    locs.push({lh, data});
+    
+    const ch=new Uint8Array(46+name.length);
+    ch.set([80,75,1,2,10,0,10,0,0,0,0,0]); ch.set(time,12); ch.set(date,14); ch.set(crc,16);
+    ch.set(SE(data.length),20); ch.set(SE(data.length),24); ch.set(SC(name.length),28);
+    ch.set(new Uint8Array(12),30); ch.set(SE(offset),42); ch.set(name,46);
+    cds.push(ch);
+    offset += lh.length + data.length;
+  });
+
+  const eocd=new Uint8Array(22);
+  eocd.set([80,75,5,6,0,0,0,0]); eocd.set(SC(files.length),8); eocd.set(SC(files.length),10);
+  let cdSize=0; cds.forEach(c => cdSize += c.length);
+  eocd.set(SE(cdSize),12); eocd.set(SE(offset),16);
+
+  // Buffer Flattening
+  let parts = [];
+  locs.forEach(l => { parts.push(l.lh); parts.push(l.data); });
+  cds.forEach(c => parts.push(c));
+  parts.push(eocd);
+
+  let totalLen = parts.reduce((acc, p) => acc + p.length, 0);
+  let final = new Uint8Array(totalLen);
+  let cur = 0;
+  parts.forEach(p => { final.set(p, cur); cur += p.length; });
+  return final;
+}
+
+// 2. TIMEOUT-PROTECTED AI SCAN
+async function aiScan(blob) {
+  const key = getANK(); // Existing key logic
+  if(!key) throw new Error('AI Key Required');
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s Timeout
+
+  try {
+    const b64 = await blobToBase64(blob);
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-3-haiku-20240307',
+        max_tokens: 50,
+        messages: [{role:'user', content:[
+          {type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}},
+          {type:'text', text:'Extract PV Serial Number. Return ONLY the string.'}
+        ]}]
+      })
+    });
+    clearTimeout(timeoutId);
+    const res = await resp.json();
+    return res.content[0].text.trim();
+  } catch(e) {
+    if(e.name === 'AbortError') throw new Error('Field connection too weak. AI timed out.');
+    throw e;
+  }
+}
+
+// 3. STORAGE ERROR FEEDBACK
+function dbSave(m) {
+  if(!DB || !curId) return;
+  try {
+    const tx = DB.transaction('mods', 'readwrite');
+    tx.objectStore('mods').put(m);
+    tx.onabort = () => notify('Disk Full! Image not saved.', 'warn');
+  } catch(e) {
+    console.error(e);
+    notify('Local database error', 'warn');
+  }
+}
+
+function notify(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (type === 'warn' ? 't-warn' : 't-ok') + ' show';
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+// Register SW
+if('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js');
+}
+</script>
+</body>
+</html>
